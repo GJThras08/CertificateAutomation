@@ -1,0 +1,13 @@
+# Streamlit secrets (Do NOT upload!)
+.streamlit/
+secrets.toml
+
+# Google local credential file backups
+*.json
+
+# Python environment & cache files
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
