@@ -1,30 +1,36 @@
 # app.py
 import streamlit as st
-
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
 
-# Import your backend logic functions and services
-from api import sheets_service, sheet_id, get_dashboard_metrics, get_participant_records, send_certificate_email
+# Import backend logic functions and services
+from api import sheet_id, get_dashboard_metrics, get_participant_records, send_certificate_email
 from generate_all import run_one_time_bulk_generation
 
 st.set_page_config(
     page_title="CertFlow",
     layout="wide"
 )
+
 # -----------------------------------------------------------------------------
 # Authentication and Login
 # -----------------------------------------------------------------------------
 USER_CREDENTIALS = {
-    "giovanni@oregonask.org": "certflow123!" 
+    "giovanni@oregonask.org": "certflow123!oask",
+    "sherri.burks@oregonask.org": "certflow123!oask",
+    "amber.lomascola@oregonask.org": "certflow123!oask",
+    "katie.lakey@oregonask.org": "certflow123!oask"
 }
 
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
+if "user_email" not in st.session_state:
+    st.session_state.user_email = None
 
 def logout():
     st.session_state.authenticated = False
+    st.session_state.user_email = None
 
 # Render Login UI if not logged in
 if not st.session_state.authenticated:
@@ -43,11 +49,11 @@ if not st.session_state.authenticated:
             if submit:
                 if username in USER_CREDENTIALS and USER_CREDENTIALS[username] == password:
                     st.session_state.authenticated = True
+                    st.session_state.user_email = username  # Captures account context
                     st.rerun()
                 else:
                     st.error("Invalid email address or password.")
-    st.stop() # Halts app execution below so unauthenticated users see nothing else
-
+    st.stop()
 
 # -----------------------------------------------------------------------------
 # 1. DATA CACHING & PIPELINE OPTIMIZATION
@@ -59,7 +65,7 @@ def fetch_master_dataset():
     Reused by both the KPI metrics blocks and the interactive table grid.
     """
     records = get_participant_records()
-    metrics = get_dashboard_metrics(sheets_service, sheet_id)
+    metrics = get_dashboard_metrics(spreadsheet_id=sheet_id)
     return records, metrics
 
 # Single pipeline execution point
@@ -208,11 +214,9 @@ st.html("""
 @st.dialog("Certificate Generation Console", width="large")
 def show_generation_console():
     st.write("System execution logs:")
-    # Creates a code/text window block that acts like a terminal shell screen
     log_area = st.empty()
     log_accumulator = ""
     
-    # Progress status indicators
     status_indicator = st.status("Scanning system files...", expanded=True)
     
     with status_indicator:
@@ -220,12 +224,11 @@ def show_generation_console():
             log_accumulator += update_msg + "\n"
             log_area.code(log_accumulator, language="bash")
             
-            # Dynamically handle state visuals within the status utility
             if "✅" in update_msg or "✨" in update_msg:
                 status_indicator.update(label="Process Finished!", state="complete")
             elif "❌" in update_msg or "⚠️" in update_msg:
                 if "Failed" in update_msg:
-                    pass # Keep going on minor row errors
+                    pass 
                 else:
                     status_indicator.update(label="Process Stopped/Failed", state="error")
     
@@ -233,7 +236,7 @@ def show_generation_console():
         st.cache_data.clear()
         st.rerun()
 
-# Header Bar Layout - Extended to 4 columns to fit the generation button perfectly
+# Header Bar Layout
 left_col, generate_col, refresh_col, right_col = st.columns([3.2, 1.0, 0.7, 0.9])
 
 with left_col:
@@ -255,12 +258,11 @@ with refresh_col:
         st.rerun()
 
 with right_col:
-    with st.popover("Admin User", width='stretch'):
+    with st.popover(st.session_state.get("user_email", "Admin User"), width='stretch'):
         st.button("Sign Out", width='stretch', type="primary", on_click=logout)
 
 pad1, center, pad2 = st.columns([.5, 4, .5])
 
-# Central Dashboard Content
 with center:
     kpi_cards = st.container()
 
@@ -301,40 +303,28 @@ with center:
             </div>
             """)
     
-    # -----------------------------------------------------------------------------
-    # CHARTS & TRENDS DATA VISUALIZATION SECTION
-    # -----------------------------------------------------------------------------
-    st.write("") # Spacer
+    st.write("") 
     chart_col1, chart_col2 = st.columns([2.5, 1.5])
 
-    # --- CHART 1: DYNAMIC ISSUANCE TRENDS (LINE WITH CIRCLE MARKERS) ---
     with chart_col1:
         st.markdown("#### Issuance Trends")
+        current_year = datetime.now().year
         
-        current_year = datetime.now().year  # Dynamic current year (e.g., 2026)
-        
-        # 1. Reorder array to start cleanly with January
         month_order = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-        
         month_map = {
             "1": "Jan", "2": "Feb", "3": "Mar", "4": "Apr", "5": "May", "6": "Jun",
             "7": "Jul", "8": "Aug", "9": "Sep", "10": "Oct", "11": "Nov", "12": "Dec"
         }
-        
-        # Initialize dictionary counters
         monthly_counts = {m: 0 for m in month_order}
         
-        # 2. Process and bucket your data matching the current calendar year
         for r in all_records:
             if r["status"] == "Sent" and r["date"] != "Unknown":
                 m_num = r["date"].split(".")[0]
-                
                 if m_num in month_map:
                     m_label = month_map[m_num]
                     if m_label in monthly_counts:
                         monthly_counts[m_label] += 1
 
-        # Check for data presence, fallback cleanly if tracking a brand new empty sheet
         has_real_data = sum(monthly_counts.values()) > 0
         if not has_real_data:
             mock_volumes = [740, 860, 910, 880, 840, 890, 750, 810, 780, 850, 810, 700]
@@ -344,15 +334,13 @@ with center:
         else:
             st.caption(f"January – December {current_year} (Live Spreadsheet Metrics)")
 
-        # 3. Create clean line chart via Plotly to remove area shading
         fig_trend = go.Figure()
-        
         fig_trend.add_trace(go.Scatter(
             x=month_order,
             y=[monthly_counts[m] for m in month_order],
-            mode='lines+markers',               # 🚀 Force line + circle marker points
-            line=dict(color='#419474', width=3), # Clean dark green line
-            marker=dict(size=8, color='#419474', symbol='circle'), # Styled circular nodes
+            mode='lines+markers',
+            line=dict(color='#419474', width=3),
+            marker=dict(size=8, color='#419474', symbol='circle'),
             name='Certificates'
         ))
         
@@ -361,25 +349,15 @@ with center:
             height=240,
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)',
-            xaxis=dict(
-                showgrid=False,
-                tickfont=dict(color='#64748b')
-            ),
-            yaxis=dict(
-                showgrid=True,
-                gridcolor='#e2e8f0',             # Subtle clean horizontal tracking gridlines
-                tickfont=dict(color='#64748b')
-            )
+            xaxis=dict(showgrid=False, tickfont=dict(color='#64748b')),
+            yaxis=dict(showgrid=True, gridcolor='#e2e8f0', tickfont=dict(color='#64748b'))
         )
-        
         st.plotly_chart(fig_trend, width='stretch', config={'displayModeBar': False})
 
-    # --- CHART 2: DELIVERY STATUS (DONUT CHART) ---
     with chart_col2:
         st.markdown("#### Delivery Status")
         st.caption("All-time dispatch breakdown")
         
-        # Dynamic calculations from database states
         sent_all_time = sum(1 for r in all_records if r["status"] == "Sent")
         failed_all_time = sum(1 for r in all_records if r["status"] == "Failed")
         
@@ -406,7 +384,6 @@ with center:
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)'
         )
-        
         st.plotly_chart(fig, width='stretch', config={'displayModeBar': False})
         
         st.markdown(
@@ -426,16 +403,12 @@ with center:
         )
 
     st.divider()
-
     st.write("") 
     st.markdown("### Participant Certificate Queue")
 
     if not all_records:
         st.info("No certificate tracking data found inside the connected Google Sheet.")
     else:
-        # -------------------------------------------------------------------------
-        # FILTERS & SEARCH ROW CONTROLS
-        # -------------------------------------------------------------------------
         search_col, course_col, status_col = st.columns([2, 1.5, 1.5])
         
         with search_col:
@@ -462,27 +435,19 @@ with center:
                 label_visibility="collapsed"
             )
 
-        # Apply frontend layout view selections
         filtered_records = all_records
-        
         if selected_course != "All Courses":
             filtered_records = [r for r in filtered_records if r["course"] == selected_course]
-            
         if selected_status != "All Statuses":
             filtered_records = [r for r in filtered_records if r["status"] == selected_status]
-            
         if search_query:
             filtered_records = [
                 r for r in filtered_records 
                 if search_query in r["name"].lower() or search_query in r["email"].lower()
             ]
 
-        # Context-aware pending calculation based on search views
         pending_records = [r for r in filtered_records if r["status"] == "Pending Send"]
         
-        # -------------------------------------------------------------------------
-        # BULK DISPATCH ACTIONS PANEL
-        # -------------------------------------------------------------------------
         col_left, col_right = st.columns([3, 1])
         with col_right:
             bulk_label = f"🚀 Bulk Send All Pending ({len(pending_records)})"
@@ -496,9 +461,6 @@ with center:
                 st.cache_data.clear()
                 st.rerun()
 
-        # -------------------------------------------------------------------------
-        # PAGINATION STATE MATH BLOCK (15 ROWS MAX)
-        # -------------------------------------------------------------------------
         ITEMS_PER_PAGE = 15
         total_items = len(filtered_records)
         max_pages = max(1, (total_items + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
@@ -512,11 +474,7 @@ with center:
         end_index = start_index + ITEMS_PER_PAGE
         paginated_records = filtered_records[start_index:end_index]
 
-        # -------------------------------------------------------------------------
-        # INTERACTIVE DATA GRID TABLE
-        # -------------------------------------------------------------------------
         st.write("") 
-        
         header_cols = st.columns([1.5, 2, 2.5, 1.2, 1])
         header_cols[0].markdown("**RECIPIENT NAME**")
         header_cols[1].markdown("**EMAIL ADDRESS**")
@@ -530,7 +488,6 @@ with center:
         else:
             for row in paginated_records:
                 cols = st.columns([1.5, 2, 2.5, 1.2, 1])
-                
                 cols[0].write(row["name"])
                 cols[1].write(row["email"])
                 cols[2].write(row["course"])
@@ -554,9 +511,6 @@ with center:
                         else:
                             st.error("Failed to route certificate file.")
             
-            # -------------------------------------------------------------------------
-            # PAGINATION NAVIGATION PANEL CONTROLS
-            # -------------------------------------------------------------------------
             st.divider()
             nav_left, nav_center, nav_right = st.columns([2, 3, 2])
             

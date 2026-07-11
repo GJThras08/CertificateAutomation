@@ -4,12 +4,10 @@ import time
 import sys
 from googleapiclient.http import MediaIoBaseUpload
 from api import (
-    sheets_service, 
-    drive_service, 
-    docs_service, 
     sheet_id, 
     template_id, 
     folder_id, 
+    get_google_services, # Dynamically retrieve credentials context
     get_participant_records,
     get_or_create_tracking_columns
 )
@@ -25,11 +23,17 @@ def run_one_time_bulk_generation(stream_mode=True):
             return message
         else:
             print(message)
-            sys.stdout.flush() # Ensure logs appear instantly in system log files
+            sys.stdout.flush() 
             return None
 
     msg = log("🚀 Initializing deep system scan for ungenerated certificates...")
     if msg: yield msg
+    
+    # Instantiate client services dynamically for active user context
+    services = get_google_services()
+    sheets_service = services["sheets"]
+    drive_service = services["drive"]
+    docs_service = services["docs"]
     
     all_records = get_participant_records()
     
@@ -142,7 +146,5 @@ def run_one_time_bulk_generation(stream_mode=True):
     msg = log(f"✅ Generation pipeline finished successfully! Created {success_count} missing certificates.")
     if msg: yield msg
 
-# This block allows the script to run independently when triggered by a daily system timer
 if __name__ == "__main__":
-    # We call it with list() to exhaust the generator since stream_mode is False
     list(run_one_time_bulk_generation(stream_mode=False))

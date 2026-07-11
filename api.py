@@ -20,23 +20,38 @@ SCOPES = [
 # -----------------------------------------------------------------------------
 # 1. CORE AUTHENTICATION & CONFIGURATION SETUP (VIA st.secrets)
 # -----------------------------------------------------------------------------
-# Safely pull simple string configuration IDs from the environment secrets config maps
 sheet_id = st.secrets["GOOGLE_SHEET_ID"]
 template_id = st.secrets["GOOGLE_TEMPLATE_ID"]
 folder_id = st.secrets["GOOGLE_FOLDER_ID"]
-YOUR_EMAIL = st.secrets["YOUR_EMAIL"] 
 
-# Fetch the dictionary tree structure for the Google OAuth authorization block
-creds_info = st.secrets["GOOGLE_SERVICE_ACCOUNT_CREDENTIALS"]
-base_creds = service_account.Credentials.from_service_account_info(
-    creds_info, scopes=SCOPES
-)
-creds = base_creds.with_subject(YOUR_EMAIL)
+def get_google_services():
+    """
+    Dynamically generates Google API services scoped to the currently logged-in user.
+    """
+    # Fix: Safeguard against st.user attributes causing runtime errors.
+    # Prioritize your custom form-based session state variables directly.
+    if st.session_state.get("authenticated") and st.session_state.get("user_email"):
+        active_email = st.session_state.user_email
+    else:
+        active_email = "giovanni@oregonask.org" 
 
-docs_service = build("docs", "v1", credentials=creds)
-sheets_service = build("sheets", "v4", credentials=creds)
-drive_service = build("drive", "v3", credentials=creds)
-gmail_service = build("gmail", "v1", credentials=creds)
+    raw_creds = st.secrets["GOOGLE_SERVICE_ACCOUNT_CREDENTIALS"]
+    creds_info = dict(raw_creds) 
+
+    base_creds = service_account.Credentials.from_service_account_info(
+        creds_info, scopes=SCOPES
+    )
+    
+    user_scoped_creds = base_creds.with_subject(active_email)
+
+    return {
+        "docs": build("docs", "v1", credentials=user_scoped_creds),
+        "sheets": build("sheets", "v4", credentials=user_scoped_creds),
+        "drive": build("drive", "v3", credentials=user_scoped_creds),
+        "gmail": build("gmail", "v1", credentials=user_scoped_creds),
+        "user_email": active_email
+    }
+
 
 # -----------------------------------------------------------------------------
 # 2. DATA PROCESSING AND METRICS PIPELINE (BATCH DRIVEN)
@@ -48,7 +63,10 @@ def get_participant_records():
     Consolidates data into one network request to avoid hitting 429 Rate Limits.
     """
     try:
-        spreadsheet_metadata = sheets_service.spreadsheets().get(
+        services = get_google_services()
+        sheets_client = services["sheets"]
+
+        spreadsheet_metadata = sheets_client.spreadsheets().get(
             spreadsheetId=sheet_id
         ).execute()
         
@@ -69,7 +87,7 @@ def get_participant_records():
             return []
 
         ranges = [f"'{title}'!A1:Z" for title in tab_titles]
-        batch_result = sheets_service.spreadsheets().values().batchGet(
+        batch_result = sheets_client.spreadsheets().values().batchGet(
             spreadsheetId=sheet_id,
             ranges=ranges
         ).execute()
@@ -115,7 +133,7 @@ def get_participant_records():
         return []
 
 
-def get_dashboard_metrics(sheets_service, spreadsheet_id):
+def get_dashboard_metrics(sheets_service=None, spreadsheet_id=None):
     """
     Computes exact metrics in-memory from the batch dataset to ensure accuracy
     and instantly prevent API quota throttling.
@@ -153,12 +171,12 @@ def get_dashboard_metrics(sheets_service, spreadsheet_id):
 # 3. HELPER & CORE BACKEND EXECUTION UTILITIES
 # -----------------------------------------------------------------------------
 
-def get_or_create_tracking_columns(sheets_service, spreadsheet_id, tab_name):
+def get_or_create_tracking_columns(sheets_client, spreadsheet_id, tab_name):
     """
     Scans headers to safely locate index boundaries for writing.
     """
     try:
-        result = sheets_service.spreadsheets().values().get(
+        result = sheets_client.spreadsheets().values().get(
             spreadsheetId=spreadsheet_id, range=f"'{tab_name}'!A1:Z1"
         ).execute()
         headers = result.get("values", [[]])[0]
@@ -171,7 +189,7 @@ def get_or_create_tracking_columns(sheets_service, spreadsheet_id, tab_name):
             doc_id_idx = status_idx + 1
             status_letter, doc_letter = chr(65 + status_idx), chr(65 + doc_id_idx)
             
-            sheets_service.spreadsheets().values().update(
+            sheets_client.spreadsheets().values().update(
                 spreadsheetId=spreadsheet_id, range=f"'{tab_name}'!{status_letter}1:{doc_letter}1",
                 valueInputOption="USER_ENTERED", body={"values": [["Status", "Doc ID"]]}
             ).execute()
@@ -184,8 +202,13 @@ def generate_certificates():
     """
     Finds missing certificates and updates dynamic columns.
     """
+    services = get_google_services()
+    sheets_client = services["sheets"]
+    drive_client = services["drive"]
+    docs_client = services["docs"]
+
     master_range = "Training List!A:Z"
-    result = sheets_service.spreadsheets().values().get(spreadsheetId=sheet_id, range=master_range).execute()
+    result = sheets_client.spreadsheets().values().get(spreadsheetId=sheet_id, range=master_range).execute()
     rows = result.get("values", [])
     
     if not rows: return False
@@ -204,23 +227,23 @@ def generate_certificates():
     new_tab_name = f"{month_day}:{raw_training_name}"[:100]
 
     query = f"name = '{new_tab_name}' and '{folder_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-    folder_search = drive_service.files().list(q=query, spaces='drive', supportsAllDrives=True, includeItemsFromAllDrives=True, fields='files(id)').execute()
+    folder_search = drive_client.files().list(q=query, spaces='drive', supportsAllDrives=True, includeItemsFromAllDrives=True, fields='files(id)').execute()
     existing_folders = folder_search.get('files', [])
     
     if existing_folders:
         target_subfolder_id = existing_folders[0]['id']
     else:
-        new_folder = drive_service.files().create(
+        new_folder = drive_client.files().create(
             body={'name': new_tab_name, 'mimeType': 'application/vnd.google-apps.folder', 'parents': [folder_id]}, 
             supportsAllDrives=True, fields='id'
         ).execute()
         target_subfolder_id = new_folder.get('id')
 
-    status_idx, doc_id_idx = get_or_create_tracking_columns(sheets_service, sheet_id, new_tab_name)
+    status_idx, doc_id_idx = get_or_create_tracking_columns(sheets_client, sheet_id, new_tab_name)
     status_letter, doc_letter = chr(65 + status_idx), chr(65 + doc_id_idx)
 
     try:
-        result = sheets_service.spreadsheets().values().get(spreadsheetId=sheet_id, range=f"'{new_tab_name}'!A2:Z").execute()
+        result = sheets_client.spreadsheets().values().get(spreadsheetId=sheet_id, range=f"'{new_tab_name}'!A2:Z").execute()
     except Exception:
         return False
 
@@ -235,7 +258,7 @@ def generate_certificates():
         first_name, last_name = r[1].strip(), r[2].strip()
         full_name = f"{first_name} {last_name}"
         
-        copy = drive_service.files().copy(
+        copy = drive_client.files().copy(
             fileId=template_id, supportsAllDrives=True,  
             body={"name": f"Temporary Doc - {full_name}", "parents": [target_subfolder_id]}
         ).execute()
@@ -251,13 +274,13 @@ def generate_certificates():
             {"replaceAllText": {"containsText": {"text": "{{Hours}}", "matchCase": True}, "replaceText": hours}},
             {"replaceAllText": {"containsText": {"text": "{{Date}}", "matchCase": True}, "replaceText": raw_date}}
         ]
-        docs_service.documents().batchUpdate(documentId=new_doc_id, body={"requests": requests}).execute()
-        pdf_data = drive_service.files().export(fileId=new_doc_id, mimeType="application/pdf").execute()
+        docs_client.documents().batchUpdate(documentId=new_doc_id, body={"requests": requests}).execute()
+        pdf_data = drive_client.files().export(fileId=new_doc_id, mimeType="application/pdf").execute()
 
         uploaded_pdf_id = None
         try:
             media = MediaIoBaseUpload(io.BytesIO(pdf_data), mimetype="application/pdf")
-            uploaded_file = drive_service.files().create(
+            uploaded_file = drive_client.files().create(
                 body={"name": f"{first_name}_{last_name}.pdf", "parents": [target_subfolder_id]},
                 media_body=media, supportsAllDrives=True, fields="id"
             ).execute()
@@ -266,12 +289,12 @@ def generate_certificates():
             pass
 
         try:
-            drive_service.files().delete(fileId=new_doc_id, supportsAllDrives=True).execute()
+            drive_client.files().delete(fileId=new_doc_id, supportsAllDrives=True).execute()
         except Exception:
             pass
 
         if uploaded_pdf_id:
-            sheets_service.spreadsheets().values().update(
+            sheets_client.spreadsheets().values().update(
                 spreadsheetId=sheet_id, range=f"'{new_tab_name}'!{status_letter}{current_row_number}:{doc_letter}{current_row_number}",
                 valueInputOption="USER_ENTERED", body={"values": [["Pending Send", uploaded_pdf_id]]}
             ).execute()
@@ -279,14 +302,17 @@ def generate_certificates():
 
 
 def send_certificate_email(record):
-    """
-    Downloads and emails the PDF. Updates sheet status to 'Sent'.
-    """
     if not record["doc_id"]: return False
     try:
-        pdf_content = drive_service.files().get_media(fileId=record["doc_id"]).execute()
+        services = get_google_services()
+        drive_client = services["drive"]
+        gmail_client = services["gmail"]
+        logged_in_user = services["user_email"]
+
+        pdf_content = drive_client.files().get_media(fileId=record["doc_id"]).execute()
+        
         message = MIMEMultipart()
-        message["to"] = "giovanni@oregonask.org" 
+        message["to"] = logged_in_user 
         message["subject"] = f"Certificate of Completion: {record['course']}"
         
         body = f"Hello {record['name']},\n\nPlease find attached your certificate.\n\nBest regards,\nOregonASK"
@@ -297,13 +323,13 @@ def send_certificate_email(record):
         message.attach(attachment)
         
         raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
-        gmail_service.users().messages().send(userId="me", body={"raw": raw_message}).execute()
+        gmail_client.users().messages().send(userId="me", body={"raw": raw_message}).execute()
         
-        sheets_service.spreadsheets().values().update(
+        services["sheets"].spreadsheets().values().update(
             spreadsheetId=sheet_id, range=f"'{record['tab_name']}'!{record['status_col_letter']}{record['row_num']}",
             valueInputOption="USER_ENTERED", body={"values": [["Sent"]]}
         ).execute()
         return True
     except Exception as e:
-        print(f"❌ Actual Gmail/Drive Routing Error: {e}")
+        print(f"❌ Dynamic Routing Error: {e}")
         return False
